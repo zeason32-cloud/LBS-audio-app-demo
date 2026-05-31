@@ -14,6 +14,11 @@ type CatalogStatus = 'loading' | 'backend' | 'demo' | 'error';
 type CompassStatus = 'idle' | 'active' | 'denied' | 'unsupported';
 type GpsMode = 'simulated' | 'requesting' | 'device';
 
+export interface GpsDebugInfo {
+  phase: string;
+  detail: string;
+}
+
 const METERS_PER_MAP_UNIT = 5;
 
 function normalizeBackendSong(song: Song): Song {
@@ -89,6 +94,15 @@ function geolocationErrorMessage(error: GeolocationPositionError) {
   return `GPS 获取超时。${suffix}`;
 }
 
+function geolocationErrorDetail(error: GeolocationPositionError) {
+  const name = error.code === error.PERMISSION_DENIED
+    ? 'PERMISSION_DENIED'
+    : error.code === error.POSITION_UNAVAILABLE
+      ? 'POSITION_UNAVAILABLE'
+      : 'TIMEOUT';
+  return `${name}(${error.code})${error.message ? ` · ${error.message}` : ''}`;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('explore');
   const [viewMode, setViewMode] = useState<ViewMode>('explore');
@@ -96,6 +110,7 @@ export default function App() {
   const [listener, setListener] = useState<Position2D>({ x: 50, y: 50 });
   const [gpsMode, setGpsMode] = useState<GpsMode>('simulated');
   const [gpsStatus, setGpsStatus] = useState('模拟定位');
+  const [gpsDebug, setGpsDebug] = useState<GpsDebugInfo | null>(null);
   const [userLocation, setUserLocation] = useState<GeoPoint | null>(null);
   const [heading, setHeading] = useState<number | null>(null);
   const [compassStatus, setCompassStatus] = useState<CompassStatus>('idle');
@@ -184,15 +199,20 @@ export default function App() {
         const lng = position.coords.longitude;
         const accuracy = position.coords.accuracy;
         setGpsMode('device');
+        setGpsDebug({
+          phase: 'watchPosition',
+          detail: `ok · accuracy ${Math.round(accuracy)}m · ${new Date().toLocaleTimeString()}`
+        });
         setUserLocation({ lat, lng, accuracy });
         setGpsStatus(`真实 GPS · ${lat.toFixed(4)}, ${lng.toFixed(4)} · ±${Math.round(accuracy)}m`);
         setListener({ x: 50, y: 50 });
         setSongs((currentSongs) => arrangeSongsAroundUser(currentSongs));
       },
       (error) => {
+        setGpsDebug({ phase: 'watchPosition', detail: geolocationErrorDetail(error) });
         setGpsStatus(geolocationErrorMessage(error));
       },
-      { enableHighAccuracy: true, timeout: 20000, maximumAge: 10000 }
+      { enableHighAccuracy: false, timeout: 20000, maximumAge: 30000 }
     );
   }, []);
 
@@ -201,6 +221,10 @@ export default function App() {
     const lng = position.coords.longitude;
     const accuracy = position.coords.accuracy;
     setGpsMode('device');
+    setGpsDebug({
+      phase: 'getCurrentPosition',
+      detail: `ok · accuracy ${Math.round(accuracy)}m · ${new Date().toLocaleTimeString()}`
+    });
     setUserLocation({ lat, lng, accuracy });
     setGpsStatus(`真实 GPS · ${lat.toFixed(4)}, ${lng.toFixed(4)} · ±${Math.round(accuracy)}m`);
     setListener({ x: 50, y: 50 });
@@ -208,34 +232,80 @@ export default function App() {
     startGpsWatch();
   }, [startGpsWatch]);
 
-  const requestDeviceGps = useCallback(() => {
+  const requestDeviceGps = useCallback(async () => {
     if (!navigator.geolocation) {
       setGpsStatus('浏览器不支持 GPS');
+      setGpsDebug({ phase: 'unsupported', detail: 'navigator.geolocation is missing' });
       return;
     }
     if (!window.isSecureContext) {
       setGpsStatus('需要 HTTPS 才能使用 GPS');
+      setGpsDebug({ phase: 'blocked', detail: `isSecureContext=${String(window.isSecureContext)}` });
       return;
     }
 
     const { isiOS, isSafari } = getDeviceProfile();
     setGpsMode('requesting');
     setListener({ x: 50, y: 50 });
+    setGpsDebug({
+      phase: 'starting',
+      detail: `${isiOS ? 'iOS' : 'non-iOS'} · ${isSafari ? 'Safari' : 'non-Safari'} · secure=${String(window.isSecureContext)}`
+    });
     setGpsStatus(isiOS
       ? isSafari
         ? 'iPhone Safari 正在请求位置...请选择“允许”并开启精确位置'
         : 'iPhone 建议用 Safari 打开后再请求位置'
       : '正在获取真实 GPS...');
 
-    navigator.geolocation.getCurrentPosition(
-      handleDevicePosition,
-      (error) => {
-        setGpsStatus(geolocationErrorMessage(error));
+    try {
+      const permission = await navigator.permissions?.query?.({ name: 'geolocation' as PermissionName });
+      if (permission?.state) {
+        setGpsDebug((previous) => ({
+          phase: previous?.phase ?? 'permission',
+          detail: `${previous?.detail ?? ''} · permission=${permission.state}`
+        }));
+      }
+    } catch {
+      setGpsDebug((previous) => ({
+        phase: previous?.phase ?? 'permission',
+        detail: `${previous?.detail ?? ''} · permission=unknown`
+      }));
+    }
+
+    const requestPosition = (
+      phase: string,
+      options: PositionOptions,
+      onError: (error: GeolocationPositionError) => void
+    ) => {
+      setGpsDebug((previous) => ({
+        phase,
+        detail: `${previous?.detail ?? ''} · ${phase} high=${String(options.enableHighAccuracy)} timeout=${options.timeout}`
+      }));
+      navigator.geolocation.getCurrentPosition(handleDevicePosition, onError, options);
+    };
+
+    const lowAccuracy: PositionOptions = { enableHighAccuracy: false, timeout: isiOS ? 18000 : 12000, maximumAge: 60000 };
+    const highAccuracy: PositionOptions = { enableHighAccuracy: true, timeout: isiOS ? 30000 : 20000, maximumAge: 0 };
+    const first = isiOS ? lowAccuracy : highAccuracy;
+    const second = isiOS ? highAccuracy : lowAccuracy;
+
+    requestPosition('primary', first, (firstError) => {
+      setGpsDebug({ phase: 'primary failed', detail: geolocationErrorDetail(firstError) });
+      if (firstError.code === firstError.PERMISSION_DENIED) {
+        setGpsStatus(geolocationErrorMessage(firstError));
         setGpsMode('simulated');
         setUserLocation(null);
-      },
-      { enableHighAccuracy: true, timeout: isiOS ? 30000 : 20000, maximumAge: 0 }
-    );
+        return;
+      }
+
+      setGpsStatus(isiOS ? '首次定位较慢，正在用另一种方式重试...' : '正在重试 GPS...');
+      requestPosition('fallback', second, (secondError) => {
+        setGpsDebug({ phase: 'fallback failed', detail: geolocationErrorDetail(secondError) });
+        setGpsStatus(geolocationErrorMessage(secondError));
+        setGpsMode('simulated');
+        setUserLocation(null);
+      });
+    });
   }, [handleDevicePosition]);
 
   const requestCompass = useCallback(async () => {
@@ -349,6 +419,7 @@ export default function App() {
             spatialMetrics={audio.metrics}
             gpsMode={gpsMode}
             gpsStatus={gpsStatus}
+            gpsDebug={gpsDebug}
             userLocation={userLocation}
             heading={heading}
             compassStatus={compassStatus}
@@ -367,6 +438,7 @@ export default function App() {
                 gpsWatchIdRef.current = null;
               }
               setGpsMode('simulated');
+              setGpsDebug(null);
               setUserLocation(null);
               setSongs(demoSongs);
               setGpsStatus('模拟定位巡航');

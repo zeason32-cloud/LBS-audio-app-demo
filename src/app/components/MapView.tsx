@@ -1,5 +1,6 @@
 import { ChevronDown, Crosshair, LocateFixed, Maximize2, Minimize2, Music2, Pause, Play, Route, X } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
+import type { GpsDebugInfo } from '../App';
 import type { GeoPoint, Position2D, Song } from '../data/audioDemo';
 import { Card, Cover, StatTrio } from './ui/kit';
 
@@ -17,6 +18,7 @@ interface MapViewProps {
   spatialMetrics: SpatialMetrics;
   gpsMode: 'simulated' | 'requesting' | 'device';
   gpsStatus: string;
+  gpsDebug: GpsDebugInfo | null;
   userLocation: GeoPoint | null;
   heading: number | null;
   compassStatus: 'idle' | 'active' | 'denied' | 'unsupported';
@@ -71,6 +73,7 @@ export default function MapView({
   spatialMetrics,
   gpsMode,
   gpsStatus,
+  gpsDebug,
   userLocation,
   heading,
   compassStatus,
@@ -97,6 +100,7 @@ export default function MapView({
         ? '不支持罗盘'
         : '罗盘待授权';
   const locating = gpsMode === 'requesting';
+  const showGpsDiagnostic = !userLocation && Boolean(gpsDebug);
 
   const positionFromEvent = useCallback((clientX: number, clientY: number) => {
     if (!mapRef.current) return null;
@@ -210,7 +214,7 @@ export default function MapView({
             </button>
             <div className="flex-1 min-w-0 text-center">
               <h1 className="text-base font-bold t-1">音乐地图</h1>
-              <p className="text-xs t-2 truncate">{gpsStatus} · {compassText}</p>
+              <p className="text-xs t-2 leading-snug">{gpsStatus} · {compassText}</p>
             </div>
             <button
               onClick={gpsMode === 'device' ? onUseSimulatedGps : onUseDeviceGps}
@@ -225,6 +229,13 @@ export default function MapView({
               {gpsMode === 'device' ? <Crosshair className="w-5 h-5" /> : <LocateFixed className={`w-5 h-5 ${locating ? 'animate-pulse' : ''}`} />}
             </button>
           </div>
+        </div>
+      )}
+
+      {showChrome && showGpsDiagnostic && (
+        <div className="absolute left-5 right-5 top-28 z-10 rounded-lg px-3 py-2 text-xs text-white/85" style={{ background: 'rgba(5,10,20,0.68)', backdropFilter: 'blur(10px)' }}>
+          <div className="font-semibold">定位诊断 · {gpsDebug?.phase}</div>
+          <div className="mt-1 leading-snug break-words">{gpsDebug?.detail}</div>
         </div>
       )}
 
