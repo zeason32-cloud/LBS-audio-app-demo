@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.DS_Store
+.claude/
+
+# Original local copies are duplicated into public/music for GitHub Pages.
+music/*.mp3
+
+*.log
+.env
+.env.*
