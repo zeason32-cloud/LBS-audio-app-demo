@@ -15,7 +15,7 @@ interface MapViewProps {
   currentSongId: string;
   isPlaying: boolean;
   spatialMetrics: SpatialMetrics;
-  gpsMode: 'simulated' | 'device';
+  gpsMode: 'simulated' | 'requesting' | 'device';
   gpsStatus: string;
   userLocation: GeoPoint | null;
   heading: number | null;
@@ -96,6 +96,7 @@ export default function MapView({
       : compassStatus === 'unsupported'
         ? '不支持罗盘'
         : '罗盘待授权';
+  const locating = gpsMode === 'requesting';
 
   const positionFromEvent = useCallback((clientX: number, clientY: number) => {
     if (!mapRef.current) return null;
@@ -212,12 +213,16 @@ export default function MapView({
               <p className="text-xs t-2 truncate">{gpsStatus} · {compassText}</p>
             </div>
             <button
-              onClick={gpsMode === 'simulated' ? onUseDeviceGps : onUseSimulatedGps}
+              onClick={gpsMode === 'device' ? onUseSimulatedGps : onUseDeviceGps}
+              disabled={locating}
               className="icon-btn text-white"
-              style={{ background: 'var(--location-500)' }}
-              aria-label="定位模式"
+              style={{
+                background: locating ? 'rgba(255,255,255,0.22)' : 'var(--location-500)',
+                opacity: locating ? 0.85 : 1
+              }}
+              aria-label={locating ? '正在定位' : '定位模式'}
             >
-              {gpsMode === 'simulated' ? <LocateFixed className="w-5 h-5" /> : <Crosshair className="w-5 h-5" />}
+              {gpsMode === 'device' ? <Crosshair className="w-5 h-5" /> : <LocateFixed className={`w-5 h-5 ${locating ? 'animate-pulse' : ''}`} />}
             </button>
           </div>
         </div>

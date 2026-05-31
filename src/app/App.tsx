@@ -12,6 +12,7 @@ type Tab = 'explore' | 'map' | 'profile';
 type ViewMode = 'explore' | 'map' | 'player' | 'profile';
 type CatalogStatus = 'loading' | 'backend' | 'demo' | 'error';
 type CompassStatus = 'idle' | 'active' | 'denied' | 'unsupported';
+type GpsMode = 'simulated' | 'requesting' | 'device';
 
 const METERS_PER_MAP_UNIT = 5;
 
@@ -68,12 +69,32 @@ function arrangeSongsAroundUser(sourceSongs: Song[]) {
     });
 }
 
+function getDeviceProfile() {
+  const ua = navigator.userAgent;
+  const isiOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isSafari = /^((?!chrome|android|crios|fxios|edgios).)*safari/i.test(ua);
+  return { isiOS, isSafari };
+}
+
+function geolocationErrorMessage(error: GeolocationPositionError) {
+  const { isiOS, isSafari } = getDeviceProfile();
+  const suffix = isiOS
+    ? isSafari
+      ? '请在 iPhone 设置 > Safari > 位置 中允许，并确认地址栏不是“请求桌面网站”。'
+      : 'iPhone 上建议用 Safari 打开，并在系统设置中允许该浏览器访问位置。'
+    : '请确认浏览器已允许位置权限。';
+
+  if (error.code === error.PERMISSION_DENIED) return `GPS 授权被拒绝。${suffix}`;
+  if (error.code === error.POSITION_UNAVAILABLE) return `暂时无法获取 GPS。${suffix}`;
+  return `GPS 获取超时。${suffix}`;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('explore');
   const [viewMode, setViewMode] = useState<ViewMode>('explore');
   const [previousView, setPreviousView] = useState<ViewMode>('explore');
   const [listener, setListener] = useState<Position2D>({ x: 50, y: 50 });
-  const [gpsMode, setGpsMode] = useState<'simulated' | 'device'>('simulated');
+  const [gpsMode, setGpsMode] = useState<GpsMode>('simulated');
   const [gpsStatus, setGpsStatus] = useState('模拟定位');
   const [userLocation, setUserLocation] = useState<GeoPoint | null>(null);
   const [heading, setHeading] = useState<number | null>(null);
@@ -152,6 +173,29 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [gpsMode]);
 
+  const startGpsWatch = useCallback(() => {
+    if (gpsWatchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+    }
+
+    gpsWatchIdRef.current = navigator.geolocation.watchPosition(
+      (position) => {
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        const accuracy = position.coords.accuracy;
+        setGpsMode('device');
+        setUserLocation({ lat, lng, accuracy });
+        setGpsStatus(`真实 GPS · ${lat.toFixed(4)}, ${lng.toFixed(4)} · ±${Math.round(accuracy)}m`);
+        setListener({ x: 50, y: 50 });
+        setSongs((currentSongs) => arrangeSongsAroundUser(currentSongs));
+      },
+      (error) => {
+        setGpsStatus(geolocationErrorMessage(error));
+      },
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 10000 }
+    );
+  }, []);
+
   const handleDevicePosition = useCallback((position: GeolocationPosition) => {
     const lat = position.coords.latitude;
     const lng = position.coords.longitude;
@@ -161,7 +205,8 @@ export default function App() {
     setGpsStatus(`真实 GPS · ${lat.toFixed(4)}, ${lng.toFixed(4)} · ±${Math.round(accuracy)}m`);
     setListener({ x: 50, y: 50 });
     setSongs((currentSongs) => arrangeSongsAroundUser(currentSongs));
-  }, []);
+    startGpsWatch();
+  }, [startGpsWatch]);
 
   const requestDeviceGps = useCallback(() => {
     if (!navigator.geolocation) {
@@ -173,39 +218,23 @@ export default function App() {
       return;
     }
 
-    setGpsMode('device');
+    const { isiOS, isSafari } = getDeviceProfile();
+    setGpsMode('requesting');
     setListener({ x: 50, y: 50 });
-    setGpsStatus('正在获取真实 GPS...');
-
-    if (gpsWatchIdRef.current !== null) {
-      navigator.geolocation.clearWatch(gpsWatchIdRef.current);
-    }
-
-    gpsWatchIdRef.current = navigator.geolocation.watchPosition(
-      handleDevicePosition,
-      (error) => {
-        const message = error.code === error.PERMISSION_DENIED
-          ? 'GPS 授权被拒绝'
-          : error.code === error.POSITION_UNAVAILABLE
-            ? '暂时无法获取 GPS'
-            : 'GPS 获取超时';
-        setGpsStatus(`${message}，继续模拟`);
-        setGpsMode('simulated');
-        setUserLocation(null);
-        if (gpsWatchIdRef.current !== null) {
-          navigator.geolocation.clearWatch(gpsWatchIdRef.current);
-          gpsWatchIdRef.current = null;
-        }
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
-    );
+    setGpsStatus(isiOS
+      ? isSafari
+        ? 'iPhone Safari 正在请求位置...请选择“允许”并开启精确位置'
+        : 'iPhone 建议用 Safari 打开后再请求位置'
+      : '正在获取真实 GPS...');
 
     navigator.geolocation.getCurrentPosition(
       handleDevicePosition,
-      () => {
-        // watchPosition handles the visible fallback state; this call warms up browsers that respond faster to getCurrentPosition.
+      (error) => {
+        setGpsStatus(geolocationErrorMessage(error));
+        setGpsMode('simulated');
+        setUserLocation(null);
       },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
+      { enableHighAccuracy: true, timeout: isiOS ? 30000 : 20000, maximumAge: 0 }
     );
   }, [handleDevicePosition]);
 
@@ -249,8 +278,9 @@ export default function App() {
   }, []);
 
   const requestDeviceSensors = useCallback(() => {
+    const { isiOS } = getDeviceProfile();
     requestDeviceGps();
-    void requestCompass();
+    if (!isiOS) void requestCompass();
   }, [requestCompass, requestDeviceGps]);
 
   useEffect(() => {
