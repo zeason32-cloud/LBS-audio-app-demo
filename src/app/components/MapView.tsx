@@ -1,6 +1,6 @@
 import { ChevronDown, Crosshair, LocateFixed, Maximize2, Minimize2, Music2, Pause, Play, Route, X } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
-import type { Position2D, Song } from '../data/audioDemo';
+import type { GeoPoint, Position2D, Song } from '../data/audioDemo';
 import { Card, Cover, StatTrio } from './ui/kit';
 
 interface SpatialMetrics {
@@ -17,6 +17,7 @@ interface MapViewProps {
   spatialMetrics: SpatialMetrics;
   gpsMode: 'simulated' | 'device';
   gpsStatus: string;
+  userLocation: GeoPoint | null;
   heading: number | null;
   compassStatus: 'idle' | 'active' | 'denied' | 'unsupported';
   minimal?: boolean;
@@ -28,6 +29,39 @@ interface MapViewProps {
 }
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const TILE_SIZE = 256;
+const TILE_ZOOM = 17;
+
+function latLngToPixel(lat: number, lng: number, zoom: number) {
+  const scale = TILE_SIZE * 2 ** zoom;
+  const sinLat = Math.sin((lat * Math.PI) / 180);
+  return {
+    x: ((lng + 180) / 360) * scale,
+    y: (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale
+  };
+}
+
+function getMapTiles(center: GeoPoint) {
+  const centerPx = latLngToPixel(center.lat, center.lng, TILE_ZOOM);
+  const centerTileX = Math.floor(centerPx.x / TILE_SIZE);
+  const centerTileY = Math.floor(centerPx.y / TILE_SIZE);
+  const tiles = [];
+
+  for (let dx = -3; dx <= 3; dx += 1) {
+    for (let dy = -3; dy <= 3; dy += 1) {
+      const x = centerTileX + dx;
+      const y = centerTileY + dy;
+      tiles.push({
+        key: `${x}-${y}`,
+        url: `https://tile.openstreetmap.org/${TILE_ZOOM}/${x}/${y}.png`,
+        left: x * TILE_SIZE - centerPx.x,
+        top: y * TILE_SIZE - centerPx.y
+      });
+    }
+  }
+
+  return tiles;
+}
 
 export default function MapView({
   songs,
@@ -37,6 +71,7 @@ export default function MapView({
   spatialMetrics,
   gpsMode,
   gpsStatus,
+  userLocation,
   heading,
   compassStatus,
   minimal = false,
@@ -53,6 +88,7 @@ export default function MapView({
   const mapRef = useRef<HTMLDivElement>(null);
   const selectedSong = songs.find((s) => s.id === selectedId) ?? songs[0];
   const activeSong = songs.find((s) => s.id === currentSongId);
+  const mapTiles = userLocation ? getMapTiles(userLocation) : [];
   const compassText = compassStatus === 'active' && heading !== null
     ? `罗盘 ${Math.round(heading)}°`
     : compassStatus === 'denied'
@@ -108,29 +144,49 @@ export default function MapView({
       onPointerDown={handlePointerDown}
       onDoubleClick={handleDoubleClick}
     >
-      {/* 地图底图：街区 / 主路 / 公园 / 水域 */}
-      <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice">
-        <rect width="100" height="100" fill="#0B1220" />
-        {/* 水域 */}
-        <path d="M-5 78 C20 70 35 86 60 76 S95 64 110 74 L110 110 -5 110 Z" fill="#102A43" opacity="0.6" />
-        {/* 公园 */}
-        <circle cx="28" cy="34" r="13" fill="#123524" opacity="0.7" />
-        <circle cx="74" cy="62" r="10" fill="#123524" opacity="0.6" />
-        {/* 街区填充 */}
-        {[18, 40, 62, 84].map((x) =>
-          [16, 40, 64].map((y) => (
-            <rect key={`${x}-${y}`} x={x - 8} y={y - 8} width="16" height="16" rx="2.5" fill="#0F1B30" opacity="0.7" />
-          ))
-        )}
-        {/* 主路 */}
-        <g stroke="#1C2B45" strokeWidth="2.2" fill="none" strokeLinecap="round">
-          <path d="M0 28 H100" />
-          <path d="M0 52 H100" />
-          <path d="M0 76 H100" />
-          <path d="M30 0 V100" />
-          <path d="M70 0 V100" />
-        </g>
-      </svg>
+      {userLocation ? (
+        <>
+          <div className="absolute inset-0 overflow-hidden bg-[#0B1220]">
+            {mapTiles.map((tile) => (
+              <img
+                key={tile.key}
+                src={tile.url}
+                alt=""
+                className="absolute h-64 w-64 max-w-none select-none"
+                draggable={false}
+                style={{
+                  left: `calc(50% + ${tile.left}px)`,
+                  top: `calc(50% + ${tile.top}px)`,
+                  filter: 'saturate(0.82) contrast(1.05) brightness(0.72)'
+                }}
+              />
+            ))}
+          </div>
+          <div className="absolute inset-0 pointer-events-none" style={{ background: 'rgba(4,10,20,0.28)' }} />
+          <div className="absolute right-3 bottom-3 z-[1] rounded bg-black/45 px-1.5 py-0.5 text-[10px] text-white/75">
+            © OpenStreetMap
+          </div>
+        </>
+      ) : (
+        <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice">
+          <rect width="100" height="100" fill="#0B1220" />
+          <path d="M-5 78 C20 70 35 86 60 76 S95 64 110 74 L110 110 -5 110 Z" fill="#102A43" opacity="0.6" />
+          <circle cx="28" cy="34" r="13" fill="#123524" opacity="0.7" />
+          <circle cx="74" cy="62" r="10" fill="#123524" opacity="0.6" />
+          {[18, 40, 62, 84].map((x) =>
+            [16, 40, 64].map((y) => (
+              <rect key={`${x}-${y}`} x={x - 8} y={y - 8} width="16" height="16" rx="2.5" fill="#0F1B30" opacity="0.7" />
+            ))
+          )}
+          <g stroke="#1C2B45" strokeWidth="2.2" fill="none" strokeLinecap="round">
+            <path d="M0 28 H100" />
+            <path d="M0 52 H100" />
+            <path d="M0 76 H100" />
+            <path d="M30 0 V100" />
+            <path d="M70 0 V100" />
+          </g>
+        </svg>
+      )}
 
       {/* listener → 当前音源 连线 */}
       {activeSong && isPlaying && (

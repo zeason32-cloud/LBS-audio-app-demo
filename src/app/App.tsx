@@ -5,13 +5,15 @@ import ExploreView from './components/ExploreView';
 import ProfileView from './components/ProfileView';
 import BottomNav from './components/BottomNav';
 import DebugView from './components/DebugView';
-import { demoSongs, type Position2D, type Song } from './data/audioDemo';
+import { demoSongs, type GeoPoint, type Position2D, type Song } from './data/audioDemo';
 import { useSpatialAudio } from './hooks/useSpatialAudio';
 
 type Tab = 'explore' | 'map' | 'profile';
 type ViewMode = 'explore' | 'map' | 'player' | 'profile';
 type CatalogStatus = 'loading' | 'backend' | 'demo' | 'error';
 type CompassStatus = 'idle' | 'active' | 'denied' | 'unsupported';
+
+const METERS_PER_MAP_UNIT = 5;
 
 function normalizeBackendSong(song: Song): Song {
   return {
@@ -39,6 +41,33 @@ function headingFromEvent(event: DeviceOrientationEvent) {
   return null;
 }
 
+function formatDistance(meters: number) {
+  return meters >= 1000 ? `${(meters / 1000).toFixed(1)}km` : `${Math.round(meters)}m`;
+}
+
+function projectNearbySong(song: Song): Song {
+  if (!song.geoOffset) return song;
+  const distanceMeters = Math.hypot(song.geoOffset.east, song.geoOffset.north);
+  return {
+    ...song,
+    position: {
+      x: Math.min(88, Math.max(12, 50 + song.geoOffset.east / METERS_PER_MAP_UNIT)),
+      y: Math.min(88, Math.max(12, 50 - song.geoOffset.north / METERS_PER_MAP_UNIT))
+    },
+    distance: formatDistance(distanceMeters)
+  };
+}
+
+function arrangeSongsAroundUser(sourceSongs: Song[]) {
+  return sourceSongs
+    .map(projectNearbySong)
+    .sort((a, b) => {
+      const da = a.geoOffset ? Math.hypot(a.geoOffset.east, a.geoOffset.north) : Number.POSITIVE_INFINITY;
+      const db = b.geoOffset ? Math.hypot(b.geoOffset.east, b.geoOffset.north) : Number.POSITIVE_INFINITY;
+      return da - db;
+    });
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('explore');
   const [viewMode, setViewMode] = useState<ViewMode>('explore');
@@ -46,6 +75,7 @@ export default function App() {
   const [listener, setListener] = useState<Position2D>({ x: 50, y: 50 });
   const [gpsMode, setGpsMode] = useState<'simulated' | 'device'>('simulated');
   const [gpsStatus, setGpsStatus] = useState('模拟定位');
+  const [userLocation, setUserLocation] = useState<GeoPoint | null>(null);
   const [heading, setHeading] = useState<number | null>(null);
   const [compassStatus, setCompassStatus] = useState<CompassStatus>('idle');
   const [songs, setSongs] = useState<Song[]>(demoSongs);
@@ -53,6 +83,7 @@ export default function App() {
   const [debugVisible, setDebugVisible] = useState(false);
   const [mapOnly, setMapOnly] = useState(false);
   const compassHandlerRef = useRef<((event: DeviceOrientationEvent) => void) | null>(null);
+  const gpsWatchIdRef = useRef<number | null>(null);
   const audio = useSpatialAudio(songs, listener, heading);
 
   useEffect(() => {
@@ -121,29 +152,62 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [gpsMode]);
 
+  const handleDevicePosition = useCallback((position: GeolocationPosition) => {
+    const lat = position.coords.latitude;
+    const lng = position.coords.longitude;
+    const accuracy = position.coords.accuracy;
+    setGpsMode('device');
+    setUserLocation({ lat, lng, accuracy });
+    setGpsStatus(`真实 GPS · ${lat.toFixed(4)}, ${lng.toFixed(4)} · ±${Math.round(accuracy)}m`);
+    setListener({ x: 50, y: 50 });
+    setSongs((currentSongs) => arrangeSongsAroundUser(currentSongs));
+  }, []);
+
   const requestDeviceGps = useCallback(() => {
     if (!navigator.geolocation) {
       setGpsStatus('浏览器不支持 GPS');
       return;
     }
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const lat = position.coords.latitude;
-        const lng = position.coords.longitude;
-        setGpsMode('device');
-        setGpsStatus(`真实 GPS · ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
-        setListener({
-          x: ((lng + 180) / 360) * 100,
-          y: ((90 - lat) / 180) * 100
-        });
-      },
-      () => {
-        setGpsStatus('GPS 授权失败，继续模拟');
+    if (!window.isSecureContext) {
+      setGpsStatus('需要 HTTPS 才能使用 GPS');
+      return;
+    }
+
+    setGpsMode('device');
+    setListener({ x: 50, y: 50 });
+    setGpsStatus('正在获取真实 GPS...');
+
+    if (gpsWatchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+    }
+
+    gpsWatchIdRef.current = navigator.geolocation.watchPosition(
+      handleDevicePosition,
+      (error) => {
+        const message = error.code === error.PERMISSION_DENIED
+          ? 'GPS 授权被拒绝'
+          : error.code === error.POSITION_UNAVAILABLE
+            ? '暂时无法获取 GPS'
+            : 'GPS 获取超时';
+        setGpsStatus(`${message}，继续模拟`);
         setGpsMode('simulated');
+        setUserLocation(null);
+        if (gpsWatchIdRef.current !== null) {
+          navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+          gpsWatchIdRef.current = null;
+        }
       },
-      { enableHighAccuracy: true, timeout: 5000 }
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
     );
-  }, []);
+
+    navigator.geolocation.getCurrentPosition(
+      handleDevicePosition,
+      () => {
+        // watchPosition handles the visible fallback state; this call warms up browsers that respond faster to getCurrentPosition.
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 }
+    );
+  }, [handleDevicePosition]);
 
   const requestCompass = useCallback(async () => {
     const OrientationEvent = window.DeviceOrientationEvent;
@@ -197,6 +261,14 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (gpsWatchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+      }
+    };
+  }, []);
+
   const handleSongSelect = (song: Song) => {
     audio.playById(song.id);
     setPreviousView(viewMode);
@@ -247,6 +319,7 @@ export default function App() {
             spatialMetrics={audio.metrics}
             gpsMode={gpsMode}
             gpsStatus={gpsStatus}
+            userLocation={userLocation}
             heading={heading}
             compassStatus={compassStatus}
             minimal={mapOnly}
@@ -259,7 +332,13 @@ export default function App() {
             }}
             onUseDeviceGps={requestDeviceSensors}
             onUseSimulatedGps={() => {
+              if (gpsWatchIdRef.current !== null) {
+                navigator.geolocation.clearWatch(gpsWatchIdRef.current);
+                gpsWatchIdRef.current = null;
+              }
               setGpsMode('simulated');
+              setUserLocation(null);
+              setSongs(demoSongs);
               setGpsStatus('模拟定位巡航');
             }}
           />
